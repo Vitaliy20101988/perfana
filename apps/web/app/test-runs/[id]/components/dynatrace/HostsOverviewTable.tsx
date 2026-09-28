@@ -21,6 +21,7 @@ import {
 import SearchIcon from '@mui/icons-material/Search';
 import { HostOverviewRow } from '@/lib/dynatrace';
 import HostLabelChips from '@/components/HostLabelChips';
+import HostCardLinksMenu from './HostCardLinksMenu';
 
 interface HostEntity {
   id: string;
@@ -179,12 +180,13 @@ export default function HostsOverviewTable({ hosts, rows, loading, onSelectHost 
               <TableCell align="right">{header('cpu', 'CPU avg')}</TableCell>
               <TableCell align="right">{header('mem', 'Memory avg')}</TableCell>
               <TableCell align="center">{header('problems', 'Problems')}</TableCell>
+              <TableCell padding="checkbox" />
             </TableRow>
           </TableHead>
           <TableBody>
             {visible.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5}>
+                <TableCell colSpan={6}>
                   <Typography variant="body2" color="text.secondary" align="center" py={2}>
                     No hosts match the current filters
                   </Typography>
@@ -221,6 +223,9 @@ export default function HostsOverviewTable({ hosts, rows, loading, onSelectHost 
                         healthy
                       </Typography>
                     )}
+                  </TableCell>
+                  <TableCell padding="checkbox">
+                    <HostCardLinksMenu hostDisplayName={host.entityDisplayName} />
                   </TableCell>
                 </TableRow>
               );
