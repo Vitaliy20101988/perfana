@@ -975,6 +975,27 @@ string-interpolating it, at all four sites at once.
 
 ## Dynatrace
 
+### The Dynatrace disk latency unit is assumed, not verified
+
+**Priority:** P2
+**Origin:** Shipped as a deliberate assumption in `feat/dynatrace-copy-scope-and-disk-metrics`
+(2026-09-29, v0.2.96.22). Nothing reachable from this machine could answer it.
+**Why:** `HOST_METRICS` in `apps/api/src/modules/dynatrace/dynatrace.service.ts` declares
+`unit: 'ms'` for `builtin:host.disk.readTime` and `builtin:host.disk.writeTime`. That is a
+guess — Dynatrace has shipped both MilliSecond and MicroSecond descriptors for these across
+versions — and `infra/dynatrace-mock` stubs only `builtin:host.cpu.usage`, so there is no
+local fixture to check it against. If it is µs, every disk-latency axis and every SLO
+threshold expressed against those panels is off by 1000x, silently: the numbers render, they
+are just the wrong magnitude.
+**Why it is P2 and not P1:** the unit drives the axis suffix and the SLO threshold
+comparison, not collection. The stored values are whatever Dynatrace returned either way, so
+fixing the declaration later does not require re-collecting anything, and a user can already
+override it per query in the edit dialog.
+**What to do:** `GET /api/v2/metrics/builtin:host.disk.readTime` against a real tenant and
+read `unit` from the descriptor. Fix the two entries in `HOST_METRICS` if it says
+MicroSecond, and add the descriptor to the mock so the next person has a fixture. The
+`ponytail:` comment above the list names the same command.
+
 ### The host details "Open in Dynatrace" link uses a SaaS route on a Managed cluster
 
 **Priority:** P3
