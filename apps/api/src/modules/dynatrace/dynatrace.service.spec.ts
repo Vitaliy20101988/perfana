@@ -1002,6 +1002,26 @@ describe('DynatraceService', () => {
         applicationDashboardId: 'dash-123',
       };
 
+      // A dashboard label repeats across scopes by design — copyQueries writes the same
+      // label into another workload — so an unscoped match handed the new query another
+      // scope's application_dashboard_id AND bypassed the deterministic id beside it,
+      // which is the artificial dashboard's only dedupe since it lost grafana_instance_id.
+      it('scopes the label reuse lookup to this system, environment and workload', async () => {
+        repository.findById.mockResolvedValue(mockDynatraceConfig);
+        repository.findDashboardByLabel.mockResolvedValue(null);
+        repository.generateDynatraceDashboardUuid.mockReturnValue('derived-uuid');
+        repository.createQueryWithSharedUuid.mockResolvedValue(mockDynatraceQuery);
+
+        await service.createQuerySmart(createQueryDto, mockUserId, mockRoles);
+
+        expect(repository.findDashboardByLabel).toHaveBeenCalledWith(
+          createQueryDto.dashboardLabel,
+          createQueryDto.systemUnderTestId,
+          createQueryDto.testEnvironment,
+          createQueryDto.workload,
+        );
+      });
+
       it('should reuse existing UUID when dashboard label exists', async () => {
         const existingUuid = 'existing-uuid-123';
         repository.findById.mockResolvedValue(mockDynatraceConfig);
@@ -1011,7 +1031,12 @@ describe('DynatraceService', () => {
         const result = await service.createQuerySmart(createQueryDto, mockUserId, mockRoles);
 
         expect(result).toEqual(mockDynatraceQuery);
-        expect(repository.findDashboardByLabel).toHaveBeenCalledWith('Performance Dashboard');
+        expect(repository.findDashboardByLabel).toHaveBeenCalledWith(
+          'Performance Dashboard',
+          expect.any(String),
+          expect.any(String),
+          expect.any(String),
+        );
         expect(repository.createQueryWithSharedUuid).toHaveBeenCalledWith(
           createQueryDto,
           existingUuid,
@@ -1057,6 +1082,49 @@ describe('DynatraceService', () => {
           expect.any(String),
           mockDynatraceConfig.organizationId,
         );
+      });
+
+      // The scope is only as good as the columns it is given. With no system or
+      // environment there is nothing to scope BY, so the lookup must be skipped outright
+      // rather than run on the label alone — which is the unscoped behaviour this change
+      // removed. The deterministic derive beside it is skipped for the same reason, so the
+      // id falls through to a randomUUID.
+      it('does not look the label up at all when the dto has no system or environment', async () => {
+        repository.findById.mockResolvedValue(mockDynatraceConfig);
+        repository.createQueryWithSharedUuid.mockResolvedValue(mockDynatraceQuery);
+
+        await service.createQuerySmart(
+          { ...createQueryDto, systemUnderTestId: undefined, testEnvironment: undefined } as never,
+          mockUserId,
+          mockRoles,
+        );
+
+        expect(repository.findDashboardByLabel).not.toHaveBeenCalled();
+        expect(repository.generateDynatraceDashboardUuid).not.toHaveBeenCalled();
+        expect(repository.ensureArtificialDashboardExists).not.toHaveBeenCalled();
+      });
+
+      // `workload` is optional on the DTO but a column on `dynatrace_queries`, where the
+      // rows written without one hold ''. Passing undefined through would make the lookup
+      // match nothing, so the reuse arm would never fire for a workload-less query.
+      // An absent workload SKIPS the reuse lookup rather than passing ''. Two reasons:
+      // TypeORM drops an undefined key from a `where`, so a partial scope would silently
+      // become the unscoped lookup this fix removed; and `workload` is NOT NULL, so no row
+      // holds '' and the query could only ever miss. The DTO marks all three @IsNotEmpty,
+      // so this is unreachable from the one live caller.
+      it('skips the reuse lookup entirely when the workload is absent', async () => {
+        repository.findById.mockResolvedValue(mockDynatraceConfig);
+        repository.generateDynatraceDashboardUuid.mockReturnValue('derived-uuid');
+        repository.createQueryWithSharedUuid.mockResolvedValue(mockDynatraceQuery);
+
+        await service.createQuerySmart(
+          { ...createQueryDto, workload: undefined } as never,
+          mockUserId,
+          mockRoles,
+        );
+
+        expect(repository.findDashboardByLabel).not.toHaveBeenCalled();
+        expect(repository.generateDynatraceDashboardUuid).toHaveBeenCalled();
       });
     });
 

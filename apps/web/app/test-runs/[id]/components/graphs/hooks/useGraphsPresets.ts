@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { authenticatedFetch } from '@/lib/api';
 import { GraphPresetsAPI, GraphPreset } from '@/lib/graph-presets';
+import { fetchGrafanaDashboardByUid } from '@/lib/grafana-dashboards';
 import { GraphPresetFormData } from '../SaveGraphPresetModal';
 import { SeriesConfig, MetricDataPoint } from '../types';
 import { convertToSeriesConfigDto, convertFromAPISeriesConfig, extractYAxisFormat } from '../utils';
@@ -75,25 +76,22 @@ export function useGraphsPresets({
 
     try {
       // Fetch the dashboard to get panel information
-      const response = await authenticatedFetch(
-        `/grafana/dashboards?uid=${encodeURIComponent(series.dashboardId)}`,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        }
-      );
+      // No instance to scope by: SeriesConfig is a PERSISTED preset shape and carries no
+      // grafanaInstanceId, so adding one means migrating stored presets. The helper reports
+      // the ambiguity instead of resolving it silently. See TODOS.md.
+      const dashboard = await fetchGrafanaDashboardByUid(series.dashboardId);
 
-      if (!response.ok) {
-        console.warn(`Failed to fetch dashboard for enrichment: ${series.dashboardId}`);
+      if (!dashboard) {
+        console.warn(
+          `No Grafana dashboard found for uid ${series.dashboardId} — the preset may reference a deleted or renamed dashboard`,
+        );
         return series;
       }
 
-      const dashboardData = await response.json();
-      const dashboard = Array.isArray(dashboardData) ? dashboardData[0] : dashboardData;
-
       // Find the matching panel
-      const panel = dashboard?.panels?.find((p: { id: number }) => p.id === series.panelId);
+      const panel = (
+        (dashboard?.panels ?? []) as (Parameters<typeof extractYAxisFormat>[0] & { id: number })[]
+      ).find((p) => p.id === series.panelId);
 
       if (!panel) {
         console.warn(`Panel ${series.panelId} not found in dashboard ${series.dashboardId}`);

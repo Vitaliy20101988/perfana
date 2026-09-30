@@ -368,9 +368,31 @@ export class DynatraceRepository {
     await withRequestEm(this.queryRepo).delete(id);
   }
 
-  async findDashboardByLabel(dashboardLabel: string) {
+  /**
+   * The artificial dashboard an existing query in THIS scope already hangs off, or null.
+   *
+   * Scoped by all four columns on purpose. Keyed on `dashboardLabel` alone it matched any
+   * query anywhere — `dynatrace_queries` has only a PK, and `copyQueries` deliberately
+   * writes the same label into other scopes — so `createQuerySmart` reused another
+   * system's or workload's `application_dashboard_id`, and its metrics, ds_compare_config
+   * rows and ADAPT verdicts landed on that scope's dashboard. It also short-circuited the
+   * deterministic id beside it, which is the only dedupe an artificial dashboard has left
+   * since it stopped carrying `grafana_instance_id`. See "An artificial Dynatrace dashboard
+   * is per-workload, but its unique constraint is not" in apps/api/CLAUDE.md.
+   */
+  async findDashboardByLabel(
+    dashboardLabel: string,
+    systemUnderTestId: string,
+    testEnvironment: string,
+    workload: string,
+  ) {
     const result = await withRequestEm(this.queryRepo).findOne({
-      where: { dashboardLabel },
+      where: { dashboardLabel, systemUnderTestId, testEnvironment, workload },
+      // dynatrace_queries has only a PK, so one scope can hold several rows — and while
+      // the lookup was unscoped they could hold DIFFERENT applicationDashboardIds. Without
+      // an order the reuse arm would still return an arbitrary one of those, which looks
+      // scoped and correct. Oldest wins, so the answer is at least stable across calls.
+      order: { createdAt: 'ASC' },
       select: ['applicationDashboardId']
     });
     return result?.applicationDashboardId || null;
