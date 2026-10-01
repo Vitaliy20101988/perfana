@@ -11,6 +11,92 @@ with the version it landed in.
 
 ---
 
+## Graph presets
+
+### Saved presets cannot carry their metrics source
+
+**Priority:** P2
+**Origin:** api-contract review of v0.2.96.27 (confidence 8/10).
+
+`SeriesConfigDto` (`apps/api/src/modules/graph-presets/dto/create-graph-preset.dto.ts`)
+declares no `metricsSourceId`, but the web's own series type does
+(`apps/web/lib/graph-presets.ts`) and the read path uses it — `useGraphsData` sets
+`metricsSourceId` as a query param when present. With `whitelist: true` the field would
+be stripped from the nested object anyway, and `convertToSeriesConfigDto`
+(`graph-formatters.ts`) does not send it. Net effect: a saved preset can never carry its
+metrics source, so a reloaded series queries `ds-metrics` unscoped — the ambiguous-source
+class this repo keeps hitting. Now that presets are editable in place via PATCH, a
+round-trip through the editor cannot restore it either.
+
+Fix: add `@IsString() @IsOptional() metricsSourceId?: string` to `SeriesConfigDto`, the
+matching field to `packages/shared` `GraphPreset.SeriesConfig`, and include it in
+`convertToSeriesConfigDto`.
+
+### `SeriesConfig.source` is missing a value the API and the web both have
+
+**Priority:** P4
+**Origin:** api-contract review of v0.2.96.27 (confidence 6/10).
+
+`packages/shared/src/entities/graph-preset.entity.ts` types `source` as
+`'grafana' | 'dynatrace'`, while `DataSource` in the API DTO and the web's own type both
+carry `'performance-metrics'`. The persisted value is correct — only the shared type
+lies — which is why `update()` and `mapToDto` both write through
+`as unknown as SeriesConfig[]`. Adding the third member lets both casts go away.
+
+### The preset save dialog's disabled state does not reach the radio
+
+**Priority:** P3
+**Origin:** test-coverage audit of v0.2.96.27. Pre-existing; current behaviour is pinned
+in `SaveGraphPresetModal.scope.test.tsx` rather than fixed.
+
+`disabled={!currentTestRunId}` sits on the `FormControlLabel`, so the rendered `<input>`
+carries no `disabled` attribute. With no run id a user can still choose "Test Run
+Specific", and the save now lands as a 400 ("testRunId is required") that the dialog
+never surfaces. Put the prop on the `Radio`, and surface the server message.
+
+### The graphs hook hand-rolls fetch instead of using the typed client
+
+**Priority:** P4
+**Origin:** maintainability review of v0.2.96.27 (confidence 8/10).
+
+`useGraphsPresets.handleSavePreset` builds its own `authenticatedFetch` POST and PATCH,
+while `GraphPresetsAPI.create` / `.update` already exist and carry the 403/404 error
+mapping the hand-rolled copy lacks — it falls back to a generic message for every status.
+Two client paths to one endpoint, and the typed one is the unused one for this flow.
+
+### No controller spec for the graph-presets routes
+
+**Priority:** P3
+**Origin:** testing review of v0.2.96.27 (confidence 8/10).
+
+`graph-presets` has only service specs, so the new `@Patch(':id')` route's wiring and its
+`resolveIsAdmin` resolution are untested, as is the `UpdateGraphPresetDto` guarantee that
+`testRunId` is stripped. A `plainToInstance` + `validate` test would pin the DTO half;
+re-adding `testRunId` to it currently leaves every test green.
+
+## Charts
+
+### The eight chart copy buttons have no end-to-end test
+
+**Priority:** P3
+**Origin:** test-coverage and testing reviews of v0.2.96.27.
+
+`apps/web/lib/plotly.ts` is well covered, but the eight modebar adapters that call it are
+not: no test asserts the filename, the toast, or that the download fallback fires. jsdom
+has no CSP, so the original bug could not have been caught there either — this wants one
+representative integration test (`transaction-graph-modal/utils/chart-config.ts` has a
+pure `buildPlotConfig`, so it is the cheapest site) or a browser-level check.
+
+### The collapsed Performance Analysis badge row uses orange for two different meanings
+
+**Priority:** P4
+**Origin:** design review of v0.2.96.27 (confidence 7/10).
+
+The row reads blue (scenarios), green (txn/s), purple (req/s), orange (`Avg: Xms`), then
+the error badge and `N poor Apdex`. `Avg` is a neutral readout tinted the same warm colour
+as the two badges that report a fault, so colour no longer encodes severity. Either move
+`Avg` to a neutral tint or differentiate the fault badges by weight or icon.
+
 ## RBAC
 
 ### Schema changes reach new databases only, and the code assumes otherwise
@@ -1502,29 +1588,29 @@ Two ways to close this, in order of preference:
 2. Keep the field but stop aggregating the whole group for it: replace the `ARRAY_AGG(...)[1]`
    with a lateral `SELECT response_data ... ORDER BY time DESC LIMIT 1`.
 
-### 13 hand-rolled clipboard handlers left under `apps/web`
+### 11 hand-rolled clipboard handlers left under `apps/web`
 
 **Priority:** P4
 **Origin:** simplification review during /ship on `fix/unify-error-details-view` (2026-09-27).
 v0.2.96.17 extracted `CopyButton` (`apps/web/components/ui/copy-button.tsx`) — a Tooltip +
 IconButton + `navigator.clipboard.writeText` with a transient "Copied!" confirmation, an
 unmount-safe revert timer and a >=24px hit area — and converted two callers (the error-details
-dialog and `SamplerDetailsModal`). Thirteen files still hand-roll the same trio, most of them
+dialog and `SamplerDetailsModal`). Eleven files still hand-roll the same trio, most of them
 without the confirmation, several without the >=24px target, and none clearing their timer:
 
 `app/settings/hooks/useApiKeys.ts`, `app/test-runs/hooks/useTestRunsFilters.ts`,
 `deep-links/components/DeepLinkDialog.tsx`, `reporting/ReportCard.tsx`,
-`anomaly-detection/components/utils/trends-plot-utils.ts`,
 `test-run-details/components/TestRunDetailsCollapsedView.tsx`,
 `test-run-details/components/TestRunIdentitySection.tsx`,
 `performance-analysis/hooks/usePerformanceAnalysisHandlers.ts`,
-`compare/current-test-run-chart/utils/current-test-run-chart-utils.ts`,
 `awr/sql/SqlStatementCard.tsx`, `awr/sql/SqlTextViewer.tsx`,
 `systems/[id]/config/components/TemplateTable.tsx`, `components/reports/HtmlReportViewerModal.tsx`.
 
-Not a mechanical sweep: some are hooks that also raise a snackbar (`useApiKeys`), and
-`trends-plot-utils.ts` builds a Plotly modebar button that copies a PNG data URL — those two are
-not `CopyButton` shaped. The dozen that are plain icon-copies-text are.
+Not a mechanical sweep: some are hooks that also raise a snackbar (`useApiKeys`). The two Plotly
+modebar buttons that used to be on this list — `trends-plot-utils.ts` and
+`current-test-run-chart-utils.ts` — are off it as of v0.2.96.27: they copy a PNG rather than text,
+were never `CopyButton` shaped, and now share `copyPlotToClipboard` in `apps/web/lib/plotly.ts`
+with the other six chart copy buttons. The rest are plain icon-copies-text.
 
 ### `alpha()` on an already-transparent theme token, in four more places
 
