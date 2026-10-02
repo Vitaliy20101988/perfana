@@ -1,4 +1,4 @@
-import { IsString, IsBoolean, IsOptional, IsArray, IsEnum, ValidateNested, IsNumber, MaxLength, IsNotEmpty } from 'class-validator';
+import { IsString, IsBoolean, IsOptional, IsArray, IsEnum, ValidateNested, IsNumber, Min, MaxLength, IsNotEmpty } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -59,6 +59,25 @@ export class SeriesConfigDto {
   @IsString()
   @IsOptional()
   yAxisFormat?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Colour slot the series holds in the chart palette. Absent on presets saved before'
+      + ' the shared chart standard, which fall back to list position.',
+    example: 0
+  })
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  colorSlot?: number;
+
+  @ApiPropertyOptional({
+    description: 'Whether the series was hidden from the chart (it stays in the legend table)',
+    example: false
+  })
+  @IsBoolean()
+  @IsOptional()
+  hidden?: boolean;
 }
 
 export class CreateGraphPresetDto {
@@ -108,8 +127,8 @@ export class CreateGraphPresetDto {
   seriesConfig!: SeriesConfigDto[];
 
   @ApiPropertyOptional({
-    description: 'Chart customization options (for future use)',
-    example: { showLegend: true, lineWidth: 2 }
+    description: 'Chart-level options stored with the preset. `axisMode` is persisted and read back on load; other keys are accepted and round-tripped untouched.',
+    example: { axisMode: 'overlay' }
   })
   @IsOptional()
   chartOptions?: Record<string, unknown>;

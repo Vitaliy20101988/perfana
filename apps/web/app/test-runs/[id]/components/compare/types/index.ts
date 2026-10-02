@@ -10,9 +10,7 @@ export type {
   GraphData,
   DataSource,
   CompareSeries,
-  ComparisonPlotProps,
   MetricsComparisonTableProps,
-  AddedSeriesDisplayProps,
 } from './compare.types';
 
 // Constants for panel types

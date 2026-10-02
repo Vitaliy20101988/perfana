@@ -38,6 +38,8 @@ export default function GraphsCard({
     testRunId,
     showToast,
     addedSeries: graphsData.addedSeries,
+    axisMode: graphsData.axisMode,
+    setAxisMode: graphsData.setAxisMode,
     setAddedSeries: graphsData.setAddedSeries,
     setSeriesData: graphsData.setSeriesData,
     setChartDataLoading: graphsData.setChartDataLoading,
@@ -68,6 +70,10 @@ export default function GraphsCard({
   // Handle removing series with toast notification
   const handleRemoveSeries = (seriesId: string) => {
     graphsData.handleRemoveSeries(seriesId, showToast);
+  };
+
+  const handleClearAllSeries = () => {
+    graphsData.handleClearAllSeries(showToast);
   };
 
   return (
@@ -154,7 +160,12 @@ export default function GraphsCard({
               chartDataLoading={graphsData.chartDataLoading}
               onRemoveSeries={handleRemoveSeries}
               onUpdateSeriesUnit={graphsData.handleUpdateSeriesUnit}
+              onToggleSeriesVisibility={graphsData.handleToggleSeriesVisibility}
+              onClearAllSeries={handleClearAllSeries}
+              axisMode={graphsData.axisMode}
+              onAxisModeChange={graphsData.setAxisMode}
               events={events}
+              showToast={showToast}
             />
           </Collapse>
 

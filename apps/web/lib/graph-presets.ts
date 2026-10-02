@@ -1,4 +1,5 @@
 import { authenticatedFetch } from './api';
+import { composeSeriesName } from './series-name';
 
 /**
  * Represents a single time series configuration for custom graphs
@@ -20,6 +21,20 @@ export interface SeriesConfig {
   yAxisFormat?: string;
   /** Metrics source ID (Phase 3.5) */
   metricsSourceId?: string;
+  /**
+   * Which colour slot the series held. Optional, and absent on every preset saved before
+   * the Analyst chart standard — those fall back to list position, which is what they
+   * were drawn with anyway.
+   */
+  colorSlot?: number;
+  /** Whether the series was hidden from the chart when the preset was saved. */
+  hidden?: boolean;
+}
+
+/** Chart-level options stored alongside the series. */
+export interface GraphChartOptions {
+  /** One axis per unit family overlaid, or one lane each. Defaults to `overlay`. */
+  axisMode?: 'overlay' | 'split';
 }
 
 /**
@@ -30,6 +45,7 @@ export interface GraphPreset {
   name: string;
   description?: string;
   seriesConfig: SeriesConfig[];
+  chartOptions?: GraphChartOptions;
   testRunId?: string;
   isGlobal: boolean;
   userId: string;
@@ -44,6 +60,7 @@ export interface CreateGraphPresetRequest {
   name: string;
   description?: string;
   seriesConfig: SeriesConfig[];
+  chartOptions?: GraphChartOptions;
   testRunId: string;
   isGlobal: boolean;
 }
@@ -194,19 +211,9 @@ export const GraphPresetUtils = {
    * @returns Suggested preset name
    */
   generatePresetName: (seriesConfig: SeriesConfig[]): string => {
-    if (seriesConfig.length === 0) {
-      return 'Custom Graph';
-    }
-
-    if (seriesConfig.length === 1) {
-      return seriesConfig[0].panelTitle;
-    }
-
-    if (seriesConfig.length <= 3) {
-      return seriesConfig.map(s => s.panelTitle).join(' + ');
-    }
-
-    return `Multi-metric Analysis (${seriesConfig.length} series)`;
+    // Shared with the chart name and with Compare, so all three name a selection the same
+    // way. Only reached when the chart has no name of its own.
+    return composeSeriesName(seriesConfig) || 'Custom Graph';
   },
 
   /**

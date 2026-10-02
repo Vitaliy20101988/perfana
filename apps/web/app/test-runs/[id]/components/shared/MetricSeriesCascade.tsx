@@ -7,26 +7,47 @@
  *
  * One dashboard and one panel at a time was six trips through the dropdowns to plot
  * six panels, and each trip had to be finished with "Add series" before the next.
+ *
+ * Presentation is the Analyst standard's `SeriesCascadePanel`: three inline scrolling
+ * columns instead of three Autocomplete popups. The popups hid the levels behind each
+ * other — you could not see which panels a dashboard had while choosing the dashboard —
+ * and each one closed over the chart it was feeding. Every behaviour below is unchanged:
+ * the fetches, the card-link preselect and its once-per-page-load consumption, dropping
+ * child selections when a parent is unpicked, the already-added greying, and the counts.
+ *
+ * Its LAYOUT is the chart standard's; its TYPE is the app's. The two are not the same
+ * thing and this is a picker, not a chart: it shipped in `MONO` at 9-11px with 22px rows,
+ * which is right for an axis tick or a legend number and wrong for forty dashboard names.
+ * So no `fontFamily` is set anywhere below — every `Typography` inherits
+ * `theme.typography.fontFamily`, which is what the rest of the app reads in — sizes are
+ * 11/12/13px, rows are 32px, and the three buttons are MUI `Button`s rather than styled
+ * `Box`es. `chartTheme(mode)` stays for the colours only: its `paper`, `plotBg`,
+ * `divider` and `hover` are already the app palette's exact values (`#1e293b`, `#f8fafc`,
+ * 12% and 4/6%), so routing them through `useTheme()` would be churn with nothing to see.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import {
-  Box,
-  Typography,
-  Autocomplete,
-  TextField,
-  CircularProgress,
-  Button,
-  Chip,
-  ListSubheader,
-} from '@mui/material';
+import { Typography, Button, useTheme } from '@mui/material';
 import { TestRun } from '@/types/test-runs';
 import { getSourceDisplayInfo } from '@/lib/metrics-source-utils';
+import { chartTheme, unitText, type ChartMode } from '@/lib/charts';
+import {
+  CASCADE_BUTTON,
+  CascadeColumn,
+  CascadeFrame,
+  CascadeGroup,
+  CascadeHint,
+  CascadeRow,
+  cascadeCountLabel,
+  cascadeGroupBy,
+  cascadeMatchesQuery,
+} from '@/components/charts/CascadeColumns';
 import { ALL_AGGREGATED_OPTION, buildAggregatedMetricName, isAllAggregatedDashboard, rtKeeperPanelId } from '@/lib/aggregated-perf-series';
 import HostLabelChips from '@/components/HostLabelChips';
 import {
   ApplicationDashboard,
+  PERFORMANCE_METRICS_PANEL_UNITS,
   PanelListOptions,
   PanelOption,
   SeriesOption,
@@ -61,16 +82,24 @@ interface MetricSeriesCascadeProps {
   panelListOptions?: PanelListOptions;
   /** Which card this is, so a `?card=…&dashboard=…&panel=…&metric=…` link preselects it. */
   card: LinkableCard;
+  /** Closes the panel without adding. Omitted where the cascade is always on screen. */
+  onCancel?: () => void;
+  /**
+   * Present = INSTANT mode: a series checkbox *is* its membership, so checking adds and
+   * unchecking removes, and the footer has no Add button. Compare works this way because
+   * its cascade is always on screen (it passes no `onCancel`), so the checkboxes are the
+   * only picture of what is compared. Graphs and Trends open theirs from `+ add series`
+   * and close it on Add, so there the checkboxes are a draft and Add is the commit.
+   */
+  onRemoveSeries?: (key: AddedSeriesKey) => void;
 }
-
-// Trends/Graphs use default-size inputs with 56px buttons; 92 stops "Select all" from
-// resizing when it toggles to "Clear".
-const PICKER_BUTTON_SX = { height: '56px', minWidth: 92, flexShrink: 0 } as const;
 
 // ponytail: a link is applied once per page load, not once per mount. The card unmounts on
 // every tab switch and collapse while the URL keeps its params, so without this the picks
 // the user cleared come back on re-expand. Module state resets on reload, which re-applies.
 const consumedLinks = new Set<string>();
+
+const plural = (n: number, word: string) => `${word}${n === 1 ? '' : 's'}`;
 
 export function MetricSeriesCascade({
   allDashboards,
@@ -81,7 +110,16 @@ export function MetricSeriesCascade({
   onPrimaryChange,
   panelListOptions,
   card,
+  onCancel,
+  onRemoveSeries,
 }: MetricSeriesCascadeProps) {
+  const instant = Boolean(onRemoveSeries);
+  // Read off the app theme, NOT taken as a prop. As a `mode = 'light'` prop, two of the
+  // three call sites never passed one, so in dark mode the Trends and Compare pickers drew
+  // a white panel with black text and invisible borders inside a dark card. A new caller
+  // must not have to know. `MetricSelectionCascade` and `TrendsChart` already do this.
+  const mode: ChartMode = useTheme().palette.mode === 'dark' ? 'dark' : 'light';
+  const theme = chartTheme(mode);
   const [selectedDashboards, setSelectedDashboards] = useState<ApplicationDashboard[]>([]);
   const [panelOptions, setPanelOptions] = useState<PanelOption[]>([]);
   const [panelsLoading, setPanelsLoading] = useState(false);
@@ -89,6 +127,12 @@ export function MetricSeriesCascade({
   const [seriesOptions, setSeriesOptions] = useState<SeriesOption[]>([]);
   const [seriesLoading, setSeriesLoading] = useState(false);
   const [selectedSeries, setSelectedSeries] = useState<SeriesOption[]>([]);
+
+  // One query per column. Deliberately NOT reset when the selection changes: narrowing
+  // dashboards to "docker" and then stepping through their panels is the flow this is for.
+  const [dashboardQuery, setDashboardQuery] = useState('');
+  const [panelQuery, setPanelQuery] = useState('');
+  const [seriesQuery, setSeriesQuery] = useState('');
 
   // Effects key off the selection contents, not the array identity React keeps recreating —
   // and off the run's identity, not the run object, which the page replaces on every
@@ -159,18 +203,33 @@ export function MetricSeriesCascade({
     s.metricName === ALL_AGGREGATED_OPTION && !isAllAggregatedDashboard(s.panel.dashboardLabel)
       ? buildAggregatedMetricName(s.panel.title)
       : s.metricName;
-  const isAdded = (s: SeriesOption) => addedSeries.some((a) =>
-    a.dashboardId === (s.panel.applicationDashboardId || s.panel.dashboard.id)
-    && a.panelId === s.panel.id
-    && a.metricName === storedName(s));
+  /** How a card stores this series. Both `isAdded` and the instant remove key off it. */
+  const addedKeyOf = (s: SeriesOption): AddedSeriesKey => ({
+    dashboardId: s.panel.applicationDashboardId || s.panel.dashboard.id,
+    panelId: s.panel.id,
+    metricName: storedName(s),
+  });
+  // A Set, not a scan: this runs per rendered series row, and a wide dashboard puts
+  // hundreds of rows against a card that can hold tens of added series.
+  const addedKeys = useMemo(
+    () => new Set(addedSeries.map((a) => `${a.dashboardId}\u0000${a.panelId}\u0000${a.metricName}`)),
+    [addedSeries],
+  );
+  const isAdded = (s: SeriesOption) => {
+    const key = addedKeyOf(s);
+    return addedKeys.has(`${key.dashboardId}\u0000${key.panelId}\u0000${key.metricName}`);
+  };
+  // The pick carries the RAW metric name; the card composes the stored one.
+  const pickOf = (s: SeriesOption): SeriesPick => ({
+    dashboard: s.panel.dashboard,
+    panel: s.panel,
+    metricName: s.metricName,
+  });
 
   const addPicked = () => {
-    onAddSeries(selectedSeries.map((s) => ({
-      dashboard: s.panel.dashboard,
-      panel: s.panel,
-      metricName: s.metricName,
-    })));
+    onAddSeries(selectedSeries.map(pickOf));
     setSelectedSeries([]);
+    onCancel?.();
   };
 
   // Preselect from a row's "Open in …" link: one step per level, each as its options land,
@@ -210,19 +269,22 @@ export function MetricSeriesCascade({
   useEffect(() => {
     const want = preselect.current;
     if (!want || selectedPanels.length === 0 || seriesFor.current !== panelsKey) return;
+    // In instant mode a selection is not a thing the user can then commit, so a link's
+    // series has to be added outright or it would light up a checkbox and do nothing.
     if (want.metricName === undefined) {
-      setSelectedSeries([...seriesOptions]);
+      if (instant) onAddSeries(seriesOptions.filter((s) => !isAdded(s)).map(pickOf));
+      else setSelectedSeries([...seriesOptions]);
     } else {
       const series = seriesOptions.find((s) => s.metricName === want.metricName);
-      if (series) setSelectedSeries([series]);
+      if (series) {
+        if (instant) { if (!isAdded(series)) onAddSeries([pickOf(series)]); }
+        else setSelectedSeries([series]);
+      }
     }
     disarm();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seriesOptions]);
 
-  const allDashboardsPicked = selectedDashboards.length === allDashboards.length && allDashboards.length > 0;
-  const allPanelsPicked = selectedPanels.length === panelOptions.length && panelOptions.length > 0;
-  const allSeriesPicked = selectedSeries.length === seriesOptions.length && seriesOptions.length > 0;
 
   const dashboardCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -230,231 +292,265 @@ export function MetricSeriesCascade({
     return counts;
   }, [panelOptions]);
 
+  const pickedDashboardIds = new Set(selectedDashboards.map((d) => d.id));
+  const pickedPanelKeys = new Set(selectedPanels.map(panelKey));
+  const pickedSeriesKeys = new Set(selectedSeries.map(seriesKey));
+
+  const toggleDashboard = (dashboard: ApplicationDashboard) => {
+    disarm();
+    pickDashboards(
+      pickedDashboardIds.has(dashboard.id)
+        ? selectedDashboards.filter((d) => d.id !== dashboard.id)
+        : [...selectedDashboards, dashboard],
+    );
+  };
+  const togglePanel = (panel: PanelOption) => {
+    disarm();
+    pickPanels(
+      pickedPanelKeys.has(panelKey(panel))
+        ? selectedPanels.filter((p) => panelKey(p) !== panelKey(panel))
+        : [...selectedPanels, panel],
+    );
+  };
+  /** What a series row's checkbox shows: membership in instant mode, a draft otherwise. */
+  const seriesChecked = (s: SeriesOption) =>
+    instant ? isAdded(s) : pickedSeriesKeys.has(seriesKey(s));
+
+  const toggleSeries = (series: SeriesOption) => {
+    disarm();
+    if (instant) {
+      if (isAdded(series)) onRemoveSeries!(addedKeyOf(series));
+      else onAddSeries([pickOf(series)]);
+      return;
+    }
+    setSelectedSeries(
+      pickedSeriesKeys.has(seriesKey(series))
+        ? selectedSeries.filter((s) => seriesKey(s) !== seriesKey(series))
+        : [...selectedSeries, series],
+    );
+  };
+
+  // Visible = what the column's filter leaves. Select all / Clear operate on THIS set,
+  // not the whole list: with 90 dashboards loaded, a "Select all" that ignored a query
+  // and picked all 90 would be a trap rather than a shortcut.
+  const visibleDashboards = allDashboards.filter((d) =>
+    cascadeMatchesQuery(dashboardQuery, d.dashboard_label, getSourceDisplayInfo(d).groupLabel),
+  );
+  const visiblePanels = panelOptions.filter((p) =>
+    cascadeMatchesQuery(panelQuery, p.title, p.dashboardLabel),
+  );
+  const visibleSeries = seriesOptions.filter((o) =>
+    cascadeMatchesQuery(seriesQuery, o.metricName, o.panel.title, o.panel.dashboardLabel),
+  );
+
+  const visibleDashboardIds = new Set(visibleDashboards.map((d) => d.id));
+  const visiblePanelKeys = new Set(visiblePanels.map(panelKey));
+  const visibleSeriesKeys = new Set(visibleSeries.map(seriesKey));
+  const allVisibleDashboardsPicked =
+    visibleDashboards.length > 0 && visibleDashboards.every((d) => pickedDashboardIds.has(d.id));
+  const allVisiblePanelsPicked =
+    visiblePanels.length > 0 && visiblePanels.every((p) => pickedPanelKeys.has(panelKey(p)));
+  const allVisibleSeriesPicked = visibleSeries.length > 0 && visibleSeries.every(seriesChecked);
+
+  // Dashboards by source (Grafana / Dynatrace / Performance test), panels by dashboard,
+  // series by dashboard/panel — the same grouping the Autocompletes used.
+  const dashboardGroups = cascadeGroupBy(visibleDashboards, (d) => getSourceDisplayInfo(d).groupLabel);
+  const panelGroups = cascadeGroupBy(visiblePanels, (p) => p.dashboardLabel);
+  const seriesGroups = cascadeGroupBy(visibleSeries, (s) => `${s.panel.dashboardLabel} / ${s.panel.title}`);
+
+  const panelUnitOf = (panel: PanelOption) =>
+    unitText(
+      panel.yAxesFormat
+      ?? (panel.source === 'performance-metrics' ? PERFORMANCE_METRICS_PANEL_UNITS[panel.id] : undefined),
+    );
+
   return (
-    <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 1.5 }}>
-      <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start', flex: '2 1 260px' }}>
-        <Autocomplete
-          multiple
-          // Picking dashboards/panels/series is almost never one choice, and a popup that
-          // closes after each made "these six" six trips through the dropdown.
-          disableCloseOnSelect
-          limitTags={4}
-          options={allDashboards}
-          getOptionLabel={(option) => option.dashboard_label || ''}
-          isOptionEqualToValue={(option, value) => option.id === value.id}
-          value={selectedDashboards}
-          onChange={(_, newValue) => { disarm(); pickDashboards(newValue); }}
-          loading={dashboardsLoading}
-          groupBy={(option) => getSourceDisplayInfo(option).groupLabel}
-          sx={{ flex: 1 }}
-          renderGroup={(params) => {
-            const dashboardInGroup = allDashboards.find(
-              d => getSourceDisplayInfo(d).groupLabel === params.group
-            );
-            const color = dashboardInGroup
-              ? getSourceDisplayInfo(dashboardInGroup).color
-              : '#9E9E9E';
-            return (
-              <li key={params.key}>
-                <ListSubheader
-                  component="div"
-                  sx={{
-                    fontWeight: 700,
-                    color,
-                    backgroundColor: 'background.paper',
-                    lineHeight: '36px',
-                  }}
-                >
-                  {params.group}
-                </ListSubheader>
-                <ul style={{ padding: 0 }}>{params.children}</ul>
-              </li>
-            );
-          }}
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              label="Dashboards"
-              variant="outlined"
-              fullWidth
-              helperText={dashboardsLoading ? 'Loading dashboards…' : `${allDashboards.length} available`}
-              InputProps={{
-                ...params.InputProps,
-                endAdornment: (
-                  <>
-                    {dashboardsLoading ? <CircularProgress size={20} /> : null}
-                    {params.InputProps.endAdornment}
-                  </>
-                ),
-              }}
-            />
+    <CascadeFrame
+      theme={theme}
+      footer={
+        <>
+          <Typography sx={{ flex: 1, fontSize: 13, color: theme.muted }} noWrap>
+            {selectedDashboards.length} {plural(selectedDashboards.length, 'dashboard')} ·{' '}
+            {selectedPanels.length} {plural(selectedPanels.length, 'panel')} ·{' '}
+            {instant ? `${addedSeries.length} series added` : `${selectedSeries.length} series selected`}
+          </Typography>
+          {onCancel && (
+            <Button size="small" variant="text" color="inherit" onClick={onCancel} sx={CASCADE_BUTTON}>
+              Cancel
+            </Button>
           )}
-          renderOption={(props, option) => {
-            const { key: _key, ...otherProps } = props;
-            const { color } = getSourceDisplayInfo(option);
-            return (
-              <Box component="li" key={option.id} {...otherProps} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <Box aria-hidden="true" sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: color, flexShrink: 0 }} />
-                <Typography variant="body2">{option.dashboard_label}</Typography>
-                <HostLabelChips labels={option.hostLabels} />
-              </Box>
-            );
-          }}
-        />
-        <Button
-          size="small"
-          onClick={() => pickDashboards(allDashboardsPicked ? [] : [...allDashboards])}
-          disabled={allDashboards.length === 0}
-          variant="outlined"
-          sx={PICKER_BUTTON_SX}
-        >
-          {allDashboardsPicked ? 'Clear' : 'Select all'}
-        </Button>
-      </Box>
-
-      <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start', flex: '2 1 260px' }}>
-        <Autocomplete
-          multiple
-          disableCloseOnSelect
-          limitTags={4}
-          options={panelOptions}
-          groupBy={(o) => o.dashboardLabel}
-          getOptionLabel={(o) => o.title}
-          isOptionEqualToValue={(o, v) => panelKey(o) === panelKey(v)}
-          value={selectedPanels}
-          onChange={(_, newValue) => { disarm(); pickPanels(newValue); }}
-          disabled={selectedDashboards.length === 0}
-          loading={panelsLoading}
-          sx={{ flex: 1 }}
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              label="Panels"
-              variant="outlined"
-              fullWidth
-              helperText={
-                selectedDashboards.length === 0
-                  ? 'Select a dashboard to see its panels'
-                  : panelsLoading
-                    ? 'Loading panels…'
-                    : `${panelOptions.length} available across ${dashboardCounts.size} dashboard${dashboardCounts.size === 1 ? '' : 's'}`
-              }
-              InputProps={{
-                ...params.InputProps,
-                endAdornment: (
-                  <>
-                    {panelsLoading ? <CircularProgress size={20} /> : null}
-                    {params.InputProps.endAdornment}
-                  </>
-                ),
-              }}
-            />
+          {!instant && (
+            <Button
+              size="small"
+              variant="contained"
+              onClick={addPicked}
+              disabled={selectedSeries.length === 0}
+              sx={CASCADE_BUTTON}
+            >
+              Add {selectedSeries.length > 0 ? `${selectedSeries.length} ` : ''}series
+            </Button>
           )}
-        />
-        <Button
-          size="small"
-          onClick={() => pickPanels(allPanelsPicked ? [] : [...panelOptions])}
-          disabled={panelOptions.length === 0}
-          variant="outlined"
-          sx={PICKER_BUTTON_SX}
-        >
-          {allPanelsPicked ? 'Clear' : 'Select all'}
-        </Button>
-      </Box>
-
-      <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start', flex: '3 1 480px' }}>
-        <Autocomplete
-          multiple
-          disableCloseOnSelect
-          limitTags={8}
-          options={seriesOptions}
-          groupBy={(o) => `${o.panel.dashboardLabel} / ${o.panel.title}`}
-          getOptionLabel={(o) => o.metricName}
-          isOptionEqualToValue={(o, v) => seriesKey(o) === seriesKey(v)}
-          value={selectedSeries}
-          onChange={(_, newValue) => { disarm(); setSelectedSeries(newValue); }}
-          disabled={selectedPanels.length === 0}
-          loading={seriesLoading}
-          sx={{ flex: 1 }}
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              label="Series"
-              variant="outlined"
-              fullWidth
-              helperText={
-                selectedPanels.length === 0
-                  ? 'Select a panel to see its series'
-                  : seriesLoading
-                    ? 'Loading series…'
-                    : `${seriesOptions.length} available from ${selectedPanels.length} panel${selectedPanels.length === 1 ? '' : 's'}`
-              }
-              InputProps={{
-                ...params.InputProps,
-                endAdornment: (
-                  <>
-                    {seriesLoading ? <CircularProgress size={20} /> : null}
-                    {params.InputProps.endAdornment}
-                  </>
-                ),
-              }}
-            />
-          )}
-          renderOption={(props, option) => {
-            const { key, ...otherProps } = props;
-            const already = isAdded(option);
-            return (
-              <Box component="li" key={key} {...otherProps} sx={{
-                opacity: already ? 0.5 : 1,
-                backgroundColor: already ? 'action.disabledBackground' : 'inherit'
-              }}>
-                <Typography variant="body2">
-                  {option.metricName}
-                  {already && (
-                    <Typography component="span" variant="caption" sx={{ ml: 1, color: 'text.secondary' }}>
-                      (already added)
-                    </Typography>
-                  )}
-                </Typography>
-              </Box>
-            );
-          }}
-          renderTags={(value, getTagProps) =>
-            value.map((option, index) => {
-              const tagProps = getTagProps({ index });
-              return (
-                // Default chip: the gradient version hardcoded primary.dark on a translucent
-                // blue, which is close to unreadable on the dark theme.
-                <Chip
-                  {...tagProps}
-                  key={seriesKey(option)}
-                  label={option.metricName}
-                  size="small"
-                />
-              );
-            })
+        </>
+      }
+    >
+        <CascadeColumn
+          theme={theme}
+          label="Dashboards"
+          heading={cascadeCountLabel('Dashboards', visibleDashboards.length, allDashboards.length)}
+          caption={
+            dashboardsLoading
+              ? 'Loading dashboards…'
+              : visibleDashboards.length === 0 && dashboardQuery.trim()
+                ? `No dashboards match "${dashboardQuery.trim()}"`
+                : `${allDashboards.length} available`
           }
-        />
-        <Button
-          size="small"
-          onClick={() => setSelectedSeries(allSeriesPicked ? [] : [...seriesOptions])}
-          disabled={seriesOptions.length === 0}
-          variant="outlined"
-          sx={PICKER_BUTTON_SX}
+          allPicked={allVisibleDashboardsPicked}
+          onToggleAll={() => {
+            disarm();
+            pickDashboards(
+              allVisibleDashboardsPicked
+                // Clear only what is on screen; a selection hidden by the query stays.
+                ? selectedDashboards.filter((d) => !visibleDashboardIds.has(d.id))
+                : [...selectedDashboards, ...visibleDashboards.filter((d) => !pickedDashboardIds.has(d.id))],
+            );
+          }}
+          toggleDisabled={visibleDashboards.length === 0}
+          query={dashboardQuery}
+          onQueryChange={setDashboardQuery}
+          queryPlaceholder="filter dashboards"
+          divider
         >
-          {allSeriesPicked ? 'Clear' : 'Select all'}
-        </Button>
-        <Button
-          variant="contained"
-          onClick={addPicked}
-          disabled={selectedSeries.length === 0}
-          sx={{ height: '56px', px: 3, whiteSpace: 'nowrap', flexShrink: 0 }}
+          {dashboardGroups.map(([group, dashboards]) => (
+            <CascadeGroup key={group} label={group} color={getSourceDisplayInfo(dashboards[0]).color}>
+              {dashboards.map((dashboard) => (
+                <CascadeRow
+                  key={dashboard.id}
+                  theme={theme}
+                  checked={pickedDashboardIds.has(dashboard.id)}
+                  onToggle={() => toggleDashboard(dashboard)}
+                  label={dashboard.dashboard_label}
+                  trailing={
+                    <>
+                      <HostLabelChips labels={dashboard.hostLabels} />
+                      {dashboardCounts.has(dashboard.dashboard_label) && (
+                        <CascadeHint theme={theme}>{dashboardCounts.get(dashboard.dashboard_label)}</CascadeHint>
+                      )}
+                    </>
+                  }
+                />
+              ))}
+            </CascadeGroup>
+          ))}
+        </CascadeColumn>
+
+        <CascadeColumn
+          theme={theme}
+          label="Panels"
+          heading={cascadeCountLabel('Panels', visiblePanels.length, panelOptions.length)}
+          caption={
+            selectedDashboards.length === 0
+              ? 'Select a dashboard to see its panels'
+              : panelsLoading
+                ? 'Loading panels…'
+                : visiblePanels.length === 0 && panelQuery.trim()
+                  ? `No panels match "${panelQuery.trim()}"`
+                  : `${panelOptions.length} available across ${dashboardCounts.size} ${plural(dashboardCounts.size, 'dashboard')}`
+          }
+          allPicked={allVisiblePanelsPicked}
+          onToggleAll={() => {
+            disarm();
+            pickPanels(
+              allVisiblePanelsPicked
+                ? selectedPanels.filter((p) => !visiblePanelKeys.has(panelKey(p)))
+                : [...selectedPanels, ...visiblePanels.filter((p) => !pickedPanelKeys.has(panelKey(p)))],
+            );
+          }}
+          toggleDisabled={visiblePanels.length === 0}
+          loading={panelsLoading}
+          empty={selectedDashboards.length === 0}
+          query={panelQuery}
+          onQueryChange={setPanelQuery}
+          queryPlaceholder="filter panels"
+          divider
         >
-          Add {selectedSeries.length > 0 ? `${selectedSeries.length} ` : ''}series
-        </Button>
-      </Box>
-    </Box>
+          {panelGroups.map(([group, panels]) => (
+            <CascadeGroup key={group} label={group} color={theme.faint}>
+              {panels.map((panel) => (
+                <CascadeRow
+                  key={panelKey(panel)}
+                  theme={theme}
+                  checked={pickedPanelKeys.has(panelKey(panel))}
+                  onToggle={() => togglePanel(panel)}
+                  label={panel.title}
+                  trailing={panelUnitOf(panel) ? <CascadeHint theme={theme}>{panelUnitOf(panel)}</CascadeHint> : null}
+                />
+              ))}
+            </CascadeGroup>
+          ))}
+        </CascadeColumn>
+
+        <CascadeColumn
+          theme={theme}
+          label="Series"
+          heading={cascadeCountLabel('Series', visibleSeries.length, seriesOptions.length)}
+          caption={
+            selectedPanels.length === 0
+              ? 'Select a panel to see its series'
+              : seriesLoading
+                ? 'Loading series…'
+                : visibleSeries.length === 0 && seriesQuery.trim()
+                  ? `No series match "${seriesQuery.trim()}"`
+                  : `${seriesOptions.length} available from ${selectedPanels.length} ${plural(selectedPanels.length, 'panel')}`
+          }
+          allPicked={allVisibleSeriesPicked}
+          onToggleAll={() => {
+            disarm();
+            if (instant) {
+              // One call per removal: the card's remover takes a key, and its setState is
+              // a functional update, so N of them in one handler compose.
+              if (allVisibleSeriesPicked) visibleSeries.forEach((o) => onRemoveSeries!(addedKeyOf(o)));
+              else onAddSeries(visibleSeries.filter((o) => !isAdded(o)).map(pickOf));
+              return;
+            }
+            setSelectedSeries(
+              allVisibleSeriesPicked
+                ? selectedSeries.filter((o) => !visibleSeriesKeys.has(seriesKey(o)))
+                : [...selectedSeries, ...visibleSeries.filter((o) => !pickedSeriesKeys.has(seriesKey(o)))],
+            );
+          }}
+          toggleDisabled={visibleSeries.length === 0}
+          loading={seriesLoading}
+          empty={selectedPanels.length === 0}
+          query={seriesQuery}
+          onQueryChange={setSeriesQuery}
+          queryPlaceholder="filter series"
+        >
+          {seriesGroups.map(([group, options]) => (
+            <CascadeGroup key={group} label={group} color={theme.faint}>
+              {options.map((option) => {
+                // Greying an added series out is right only where the checkbox is a draft.
+                // In instant mode the checkbox IS the membership, so it has to stay live or
+                // there is no way to take a series back off.
+                const already = !instant && isAdded(option);
+                return (
+                  <CascadeRow
+                    key={seriesKey(option)}
+                    theme={theme}
+                    checked={seriesChecked(option)}
+                    onToggle={() => toggleSeries(option)}
+                    disabled={already}
+                    label={option.metricName}
+                    trailing={already ? <CascadeHint theme={theme}>added</CascadeHint> : null}
+                  />
+                );
+              })}
+            </CascadeGroup>
+          ))}
+        </CascadeColumn>
+    </CascadeFrame>
   );
 }
+
+export const SeriesCascadePanel = MetricSeriesCascade;
 
 export default MetricSeriesCascade;

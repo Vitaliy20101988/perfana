@@ -20,6 +20,8 @@ import {
   fetchAggregatedSeriesData,
 } from '../utils/aggregated-series';
 import { isGrafana, isPerformanceTest } from '@/lib/metrics-source-utils';
+import { nextFreeSlot } from '@/lib/charts';
+import type { AxisDisplayMode } from '@/components/charts';
 import { TestRun } from '@/types/test-runs';
 import { mapLimit, OPTION_FETCH_CONCURRENCY, type SeriesPick } from '../../shared/metric-options';
 
@@ -41,6 +43,9 @@ export function useGraphsData({ testRun, testRunId }: UseGraphsDataProps) {
 
   // Chart name state
   const [chartName, setChartName] = useState<string>('');
+
+  // Overlay, or one lane per unit family. Saved with the preset.
+  const [axisMode, setAxisMode] = useState<AxisDisplayMode>('overlay');
 
   // Series data state for chart visualization
   const [seriesData, setSeriesData] = useState<Map<string, MetricDataPoint[]>>(new Map());
@@ -162,10 +167,17 @@ export function useGraphsData({ testRun, testRunId }: UseGraphsDataProps) {
    * panel, so one click can add series from several panels across several dashboards.
    */
   const handleAddSeries = useCallback(async (picks: SeriesPick[], showToast: (message: string) => void) => {
+    // Colour slots are handed out as the LOWEST free one, not by list position: a series
+    // removed frees its slot for the next one added, and every line that stays keeps the
+    // colour the reader has been following.
+    const taken = addedSeries.map(s => s.colorSlot);
     const newSeriesList: SeriesConfig[] = picks.map(({ dashboard, panel, metricName }) => {
       const isAggregated = metricName === ALL_AGGREGATED_OPTION
         && !isAllAggregatedDashboard(dashboard.dashboard_label);
       const spec = isAggregated ? getAggregateSpec(panel.id) : null;
+      const unit = isAggregated && spec ? aggregatedYAxisFormat(spec.metric) : panel.yAxesFormat;
+      const slot = nextFreeSlot(taken);
+      taken.push(slot);
       return {
         id: `${dashboard.id}-${panel.id}-${isAggregated ? 'aggregated' : metricName}-${Date.now()}-${Math.random()}`,
         dashboardId: panel.applicationDashboardId || dashboard.id,
@@ -174,8 +186,12 @@ export function useGraphsData({ testRun, testRunId }: UseGraphsDataProps) {
         panelTitle: panel.title,
         metricName: isAggregated ? buildAggregatedMetricName(panel.title) : metricName,
         source: panel.source,
-        yAxisFormat: isAggregated && spec ? aggregatedYAxisFormat(spec.metric) : panel.yAxesFormat,
+        yAxisFormat: unit,
+        // Kept alongside, so the series table can show that a changed unit is an
+        // override of the panel's own and offer a reset.
+        panelYAxisFormat: unit,
         metricsSourceId: panel.metricsSourceId || dashboard.metrics_source_id,
+        colorSlot: slot,
       };
     });
 
@@ -232,6 +248,27 @@ export function useGraphsData({ testRun, testRunId }: UseGraphsDataProps) {
   }, []);
 
   /**
+   * Empty the chart: both the series list and the fetched points behind it.
+   *
+   * Looping handleRemoveSeries would fire one toast and one render per series — 17 of
+   * each on the chart this was asked for — so it is its own handler.
+   *
+   * axisMode is deliberately kept. chartName is NOT kept, and not by choice here: the
+   * effect below regenerates it from `addedSeries` on every change, so clearing resets
+   * it to ''. That effect also overwrites a title the user typed as soon as they add or
+   * remove a series — pre-existing, and filed in TODOS.md rather than fixed inside a
+   * clear-all handler.
+   */
+  const handleClearAllSeries = useCallback((showToast: (message: string) => void) => {
+    // Read the count from this render, NOT from inside the setState updater: the updater
+    // has not run by the time the toast fires, so that reported "0 series removed".
+    const cleared = addedSeries.length;
+    setAddedSeries([]);
+    setSeriesData(new Map());
+    showToast(cleared === 1 ? 'Series removed' : `${cleared} series removed`);
+  }, [addedSeries.length]);
+
+  /**
    * Handle updating the unit for a series
    */
   const handleUpdateSeriesUnit = useCallback((seriesId: string, newUnit: string | null) => {
@@ -239,6 +276,16 @@ export function useGraphsData({ testRun, testRunId }: UseGraphsDataProps) {
       series.id === seriesId
         ? { ...series, yAxisFormat: newUnit || undefined }
         : series
+    ));
+  }, []);
+
+  /**
+   * Hide or show a series. It stays in the list (and in the preset) either way — the
+   * swatch is a toggle, not a delete.
+   */
+  const handleToggleSeriesVisibility = useCallback((seriesId: string) => {
+    setAddedSeries(prev => prev.map(series =>
+      series.id === seriesId ? { ...series, hidden: !series.hidden } : series
     ));
   }, []);
 
@@ -294,12 +341,14 @@ export function useGraphsData({ testRun, testRunId }: UseGraphsDataProps) {
     chartName,
     seriesData,
     chartDataLoading,
+    axisMode,
 
     // State setters
     setAddedSeries,
     setSeriesData,
     setChartName,
     setChartDataLoading,
+    setAxisMode,
 
     // Fetch functions
     fetchApplicationDashboards,
@@ -309,6 +358,8 @@ export function useGraphsData({ testRun, testRunId }: UseGraphsDataProps) {
     getAllDashboardsMerged,
     handleAddSeries,
     handleRemoveSeries,
+    handleClearAllSeries,
     handleUpdateSeriesUnit,
+    handleToggleSeriesVisibility,
   };
 }

@@ -27,60 +27,50 @@ it('draws one trace per series, not per metric name', () => {
   // Stable references: the hook's effect keys on these, and fresh ones per render loop it.
   const props = {
     metricsData: [row(rt, '10', 280), row(err, '10', 0), row(rt, '12', 300), row(err, '12', 0.01)],
-    selectedMetric: null,
-    evaluateType: 'avg',
     trendsExpanded: true,
     addedSeries: [rt, err],
     showToast: jest.fn(),
+    cursorIndex: null,
   };
   const { result } = renderHook(() => useTrendsPlot(props));
 
   const traces = result.current.plotData as Array<{ name: string; y: number[]; yaxis: string }>;
+  // percentunit is drawn as 0-100, so 0.01 plots as 1 on its own (right) axis.
   expect(traces.map((t) => ({ name: t.name, y: t.y, yaxis: t.yaxis }))).toEqual([
     { name: 'All aggregated — Transaction RT Avg', y: [280, 300], yaxis: 'y' },
-    { name: 'All aggregated — Transaction Error Rate', y: [0, 0.01], yaxis: 'y2' },
+    { name: 'All aggregated — Transaction Error Rate', y: [0, 1], yaxis: 'y2' },
   ]);
 });
 
-it('titles a single series by its label and several by the panel picked first', () => {
+it('names a series in its trace and in its table row, so the two cannot disagree', () => {
   const props = {
     metricsData: [row(err, '10', 0)],
-    selectedMetric: null,
-    evaluateType: 'q95',
     trendsExpanded: true,
     addedSeries: [rt, err],
     showToast: jest.fn(),
+    cursorIndex: null,
   };
   const { result } = renderHook(() => useTrendsPlot(props));
 
   const traces = result.current.plotData as Array<{ name: string }>;
   expect(traces.map((t) => t.name)).toEqual(['All aggregated — Transaction Error Rate']);
-  const layout = result.current.plotLayout as { title: { text: string } };
-  expect(layout.title.text).toBe('All aggregated — Transaction Error Rate Trends (q95)');
-});
-
-it('titles several series by the panel picked first, without a series count', () => {
-  const props = {
-    metricsData: [row(rt, '10', 280), row(err, '10', 0)],
-    selectedMetric: { id: 101, title: 'Transaction RT Avg', type: 'timeseries' },
-    evaluateType: 'avg',
-    trendsExpanded: true,
-    addedSeries: [rt, err],
-    showToast: jest.fn(),
-  };
-  const { result } = renderHook(() => useTrendsPlot(props));
-  const layout = result.current.plotLayout as { title: { text: string } };
-  expect(layout.title.text).toBe('Transaction RT Avg Trends (avg)');
+  // A row per ADDED series, including the one with no data in range: the swatch and the
+  // remove button are how it gets dealt with.
+  expect(result.current.rows.map((r) => r.name)).toEqual([
+    'All aggregated — Transaction RT Avg',
+    'All aggregated — Transaction Error Rate',
+  ]);
+  // The title moved to the card header, so the layout carries no title of its own.
+  expect(result.current.plotLayout).not.toHaveProperty('title');
 });
 
 it('clears the plot when the card is collapsed or has no data', () => {
   const props = {
     metricsData: [row(rt, '10', 280)],
-    selectedMetric: null,
-    evaluateType: 'avg',
     trendsExpanded: false,
     addedSeries: [rt],
     showToast: jest.fn(),
+    cursorIndex: null,
   };
   const { result } = renderHook(() => useTrendsPlot(props));
   expect(result.current.plotData).toEqual([]);

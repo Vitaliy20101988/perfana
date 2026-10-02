@@ -128,14 +128,18 @@ it('drops the panels and series of a dashboard that is cleared, and reports no p
   expect(onPrimaryChange).toHaveBeenLastCalledWith(null, null);
 });
 
-it('disables every picker below a level with nothing picked, and the dashboard button with nothing to pick', () => {
+it('prompts for each level with nothing picked, and disables every control with nothing to pick', () => {
   setup({ allDashboards: [] });
 
   expect(screen.getByText('0 available')).toBeInTheDocument();
-  expect(screen.getByLabelText('Panels')).toBeDisabled();
-  expect(screen.getByLabelText('Series')).toBeDisabled();
+  // The columns are inline now rather than popups, so a level with no parent shows its
+  // prompt instead of a disabled input.
+  expect(screen.getByText('Select a dashboard to see its panels')).toBeInTheDocument();
+  expect(screen.getByText('Select a panel to see its series')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Add series' })).toBeDisabled();
   expect(levelButton('Dashboards')).toBeDisabled();
+  expect(levelButton('Panels')).toBeDisabled();
+  expect(levelButton('Series')).toBeDisabled();
 });
 
 it('ignores a panel load that finishes after the dashboard was cleared', async () => {
@@ -183,8 +187,99 @@ it('greys out the synthetic "All aggregated" option once it is on the chart unde
   selectAll('Panels');
   await screen.findByText('2 available from 1 panel');
 
-  fireEvent.mouseDown(screen.getByLabelText('Series'));
-  const option = await screen.findByText('All aggregated');
-  expect(option.textContent).toContain('(already added)');
-  expect(screen.getByText('T01').textContent).not.toContain('(already added)');
+  // The series column is always on screen; its rows need no popup to be opened.
+  const added = (name: string) =>
+    screen.getByRole('checkbox', { name }).closest('.MuiBox-root')!.textContent;
+  expect(added('All aggregated')).toContain('added');
+  expect(added('T01')).not.toContain('added');
+  expect(screen.getByRole('checkbox', { name: 'All aggregated' })).toBeDisabled();
+  expect(screen.getByRole('checkbox', { name: 'T01' })).not.toBeDisabled();
+});
+
+/**
+ * The column filters. 90 dashboards is the real case, and two behaviours are not
+ * obvious from the UI: filtering must never change the selection, and Select all
+ * must mean "all of what I can see" rather than "all 90".
+ */
+describe('column filters', () => {
+  const filterFor = (level: 'Dashboards' | 'Panels' | 'Series') =>
+    screen.getByLabelText(`Filter ${level.toLowerCase()}`);
+
+  it('narrows a column to matching rows and counts them against the total', () => {
+    setup();
+
+    expect(screen.getByText('Dashboards 2')).toBeInTheDocument();
+    fireEvent.change(filterFor('Dashboards'), { target: { value: 'jvm' } });
+
+    expect(screen.getByText('Dashboards 1 / 2')).toBeInTheDocument();
+    expect(screen.getByText('JVM')).toBeInTheDocument();
+    expect(screen.queryByText('Perf')).not.toBeInTheDocument();
+  });
+
+  it('matches the group heading too, so a source name finds its dashboards', () => {
+    setup();
+
+    // `perf` is a performance_test dashboard; its group heading is what matches here.
+    fireEvent.change(filterFor('Dashboards'), { target: { value: 'grafana' } });
+
+    expect(screen.getByText('JVM')).toBeInTheDocument();
+    expect(screen.queryByText('Perf')).not.toBeInTheDocument();
+  });
+
+  it('is case-insensitive and ignores surrounding whitespace', () => {
+    setup();
+    fireEvent.change(filterFor('Dashboards'), { target: { value: '  JvM  ' } });
+    expect(screen.getByText('JVM')).toBeInTheDocument();
+  });
+
+  it('says so rather than showing an empty column when nothing matches', () => {
+    setup();
+    fireEvent.change(filterFor('Dashboards'), { target: { value: 'zzz' } });
+    expect(screen.getByText('No dashboards match "zzz"')).toBeInTheDocument();
+  });
+
+  // The important one: a filter is a view, not a selection.
+  it('keeps a selection that the filter hides, and restores it on clear', async () => {
+    setup();
+
+    selectAll('Dashboards');
+    await waitFor(() => expect(fetchPanelsForDashboards).toHaveBeenCalled());
+    expect(screen.getByLabelText('Perf')).toBeChecked();
+
+    fireEvent.change(filterFor('Dashboards'), { target: { value: 'jvm' } });
+    expect(screen.queryByLabelText('Perf')).not.toBeInTheDocument();
+
+    // Clearing the query brings it back still picked — the filter never touched it.
+    fireEvent.click(screen.getByLabelText('Clear dashboards filter'));
+    expect(screen.getByLabelText('Perf')).toBeChecked();
+  });
+
+  // Select all while filtered must not reach past the filter.
+  it('selects only the visible rows, leaving the filtered-out ones alone', async () => {
+    setup();
+
+    fireEvent.change(filterFor('Dashboards'), { target: { value: 'jvm' } });
+    selectAll('Dashboards');
+
+    await waitFor(() => expect(fetchPanelsForDashboards).toHaveBeenCalledWith([jvm], testRun, expect.anything()));
+
+    fireEvent.click(screen.getByLabelText('Clear dashboards filter'));
+    expect(screen.getByLabelText('JVM')).toBeChecked();
+    expect(screen.getByLabelText('Perf')).not.toBeChecked();
+  });
+
+  // ...and Clear while filtered must not clear the hidden ones either.
+  it('clears only the visible rows', async () => {
+    setup();
+
+    selectAll('Dashboards');
+    await waitFor(() => expect(fetchPanelsForDashboards).toHaveBeenCalled());
+
+    fireEvent.change(filterFor('Dashboards'), { target: { value: 'jvm' } });
+    selectAll('Dashboards'); // reads "Clear" now — only JVM is visible
+
+    fireEvent.click(screen.getByLabelText('Clear dashboards filter'));
+    expect(screen.getByLabelText('JVM')).not.toBeChecked();
+    expect(screen.getByLabelText('Perf')).toBeChecked();
+  });
 });
