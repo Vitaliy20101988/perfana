@@ -134,9 +134,38 @@ export function normaliseLegacyAggregatedSeries<
   };
 }
 
+/**
+ * What `buildAggregatedMetricName` puts in front of the panel title, and the ONLY way to
+ * recognise its output. Shared so the two cannot drift: change the separator in one place
+ * and `seriesRowName` silently stops matching, which is the exact bug it was extracted to
+ * prevent — no error, just a row that reads its panel twice.
+ */
+const AGGREGATED_PREFIX = `${ALL_AGGREGATED_OPTION} — `;
+
 /** Readable, per-panel-unique legend/row name so two aggregated panels don't collide. */
 export function buildAggregatedMetricName(panelTitle: string): string {
-  return `${ALL_AGGREGATED_OPTION} — ${panelTitle}`;
+  return `${AGGREGATED_PREFIX}${panelTitle}`;
+}
+
+/**
+ * The name a chart's series table and its exported legend both show for a series.
+ *
+ * `panelTitle · metricName`, except for the SYNTHETIC run-wide aggregate, whose metric name
+ * is already `buildAggregatedMetricName(panelTitle)` and would otherwise read its panel
+ * twice.
+ *
+ * The test is that composed prefix, never a bare `startsWith(ALL_AGGREGATED_OPTION)`. The
+ * `Performance test metrics all aggregated` dashboard carries a REAL series named exactly
+ * `All aggregated` on every one of its panels — that is why `shouldOfferAllAggregated`
+ * suppresses the synthetic one there — so the loose test dropped the panel title from all of
+ * them: adding Transaction RT Avg/P90/P95/P99 off that dashboard gave four rows reading
+ * "All aggregated", four identically-named traces in an exported legend, and no way to tell
+ * which line was the p99.
+ */
+export function seriesRowName(panelTitle: string, metricName: string): string {
+  return metricName.startsWith(AGGREGATED_PREFIX)
+    ? metricName
+    : `${panelTitle} · ${metricName}`;
 }
 
 /**

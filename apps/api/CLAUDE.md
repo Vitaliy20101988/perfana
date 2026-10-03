@@ -520,6 +520,65 @@ and then fail the index build on rows it could not see. `up()` re-counts the dup
 after the dedupe and throws with that cause named rather than letting an opaque 23505 block the
 deploy.
 
+### The report's charts follow the app's chart standard, from a copy of its tokens
+
+A report is one self-contained HTML file read in an iframe with no `allow-scripts`, so there
+is no Plotly: every chart in every section is server-rendered SVG. Three builders draw them —
+`chart-svg.service.ts` (Graphs, Comparisons, Trends), the errors-over-time chart in
+`error-analysis-renderer.ts`, and the response-times chart in
+`transaction-response-times-renderer.ts` — and until v0.2.97.2 each answered "what colour, how
+thick, which gridlines" differently, none of them the way the app does.
+
+They now read `chart-tokens.ts`, a hand copy of `apps/web/lib/charts/tokens.ts`. Eight things
+about that arrangement are easy to get wrong:
+
+1. **The copy is guarded, not trusted.** `chart-tokens.spec.ts` reads the web file off disk
+   and compares the palette, the inks, the line widths, the type scale and both font stacks.
+   Change the app's palette and this fails here rather than producing a report whose teal is
+   last quarter's teal. Its first case asserts the web file was *found* — a moved or renamed
+   tokens file must fail loudly, not pass every later comparison against `undefined`.
+2. **`CHART_SANS` is single-quoted where the app's `SANS` is not, and that is not cosmetic.**
+   A report sets fonts through inline `style="…"` attributes, so `"Inter"` closes the
+   attribute and the rest of the declaration lands in the markup as stray text. The drift
+   spec compares the two stacks with quotes normalised, so they still cannot diverge.
+3. **The legend is a CSS grid with table roles, never an HTML `<table>`.** The comparisons
+   section draws a chart inside a detail row of its own data table, and
+   `report-interactivity.ts` enhances every `.table-scroll table` on the page — a real
+   `<table>` there would be given sortable headers and its own "Filter rows..." box inside
+   the chart card, and would put `<td>`s inside a detail cell that `collectUnits` requires to
+   be the row's only cell.
+4. **Two marks stay louder than the app's on purpose, because a report prints.** The
+   analysis-window boundary keeps amber (`ANALYSIS_BOUNDARY_COLOR`) where the Graphs card
+   draws a `theme.faint` hairline, and the excluded band uses `CHART_INK.excludedPrint` (10%)
+   rather than the app's `excluded` (4%), which is invisible on paper.
+5. **In `chart-svg.service.ts` only, tick labels keep their unit, so its left gutter stays
+   wide.** That chart's `formatValue` rescales per value, so one axis can legitimately read
+   `900 ms` and `1.2 s`; dropping the unit would make those two numbers incomparable, and
+   `padding.left` is sized for `287.36 ms`, not for `287.36`. The other two builders carry a
+   single fixed unit, name it in the axis caption and keep a narrow gutter (56-62px) with
+   bare numeric ticks — do not "fix" those to match.
+6. **The series table is one grid, and its rows are `display:contents`.** Re-declaring
+   `grid-template-columns` per row makes every row its own grid sized to its own content,
+   and then the number columns do not line up and `text-align:right` aligns nothing — which
+   is the entire point of replacing a swatch legend with a table. The app's `SeriesTable`
+   survives per-row grids only because its tracks are fixed pixel widths; a report's numbers
+   are formatted per unit, so the tracks have to be content-sized. Type and colour are
+   declared once on the container and inherited: repeating them per cell cost ~1.9 KB per
+   series row in a document that is stored in Postgres, mailed and run through Puppeteer.
+7. **`CHART_SIZE.legendFont` is 11px and is NOT mirrored from the app.** The compiler prints
+   under `body { zoom: 0.8 }`, so the table's 10px would reach paper at 8px — smaller than
+   the 9pt legend it replaced. The SVG needs no such allowance: its text scales with the
+   viewBox, not the zoom.
+8. **`npm run preflight` runs the drift spec** (`test:chart-tokens`, 0.3 s). Before that it
+   was a spec nothing executed: preflight is lint + type-check + two check scripts + the RLS
+   suite, and `.github/workflows/pr-quality-gate.yml` is `workflow_dispatch` only, so a
+   palette edit in `apps/web` could merge with the guard never running.
+
+Deliberately **not** mirrored: the dark palette (there is no dark report), and the y-axis
+domain. The app pins a non-negative axis to `[0, niceTop]`; the report keeps its padded
+min..max, because re-framing the charts of a report people have already read is a different
+change from restyling them.
+
 ### The host metric list has ONE definition, and the disk metrics must fold explicitly
 
 `HOST_METRICS` in `modules/dynatrace/dynatrace.service.ts` is the single list behind both
