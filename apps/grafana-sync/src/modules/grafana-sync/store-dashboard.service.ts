@@ -17,6 +17,7 @@ type PanelDatasource =
 interface PanelWithDatasource {
   title?: string;
   datasource?: PanelDatasource;
+  targets?: Array<{ datasource?: PanelDatasource }>;
 }
 
 /**
@@ -128,10 +129,11 @@ export class StoreDashboardService {
           await this.storeDashboard(instance, dashboard, false);
           addedCount++;
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.stack : String(error);
-          this.logger.error(
-            `Failed adding dashboard "${dashboard.title}" (UID: ${dashboard.uid}) for ${instance.label}`,
-            errorMessage,
+          // storeDashboard already logged this with a stack; one line is enough to say
+          // the loop carried on.
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Skipped dashboard "${dashboard.title}" (UID: ${dashboard.uid}) for ${instance.label}: ${message}`,
           );
         }
       }
@@ -316,12 +318,24 @@ export class StoreDashboardService {
       throw new Error('No datasource found in panel');
     }
 
+    // Grafana embeds the concrete type beside the (possibly templated) uid, on the panel or
+    // on its first target. Same two sources the worker uses (panels/helpers.ts).
+    const embeddedType = (d: PanelDatasource | undefined): string | undefined =>
+      d && typeof d === 'object' && typeof d.type === 'string' && d.type.length > 0
+        ? d.type
+        : undefined;
+    const panelDatasourceType = embeddedType(ds) ?? embeddedType(panel.targets?.[0]?.datasource);
+
     if (typeof ds === 'object') {
       if (ds.uid) {
         const variableName = this.parseTemplateVariableRef(ds.uid);
         if (variableName) {
           return {
-            type: this.resolveDatasourceTypeFromTemplating(variableName, templatingList, ds.type),
+            type: this.resolveDatasourceTypeFromTemplating(
+              variableName,
+              templatingList,
+              panelDatasourceType,
+            ),
           };
         }
         return this.grafanaApiService.getDatasourceByUid(instanceId, ds.uid);
@@ -329,8 +343,8 @@ export class StoreDashboardService {
 
       // Object without uid: prior code passed it to getDatasourceByName (not a real name).
       // If Grafana embedded a type, that is all we persist — use it; otherwise fail clearly.
-      if (typeof ds.type === 'string' && ds.type.length > 0) {
-        return { type: ds.type };
+      if (panelDatasourceType) {
+        return { type: panelDatasourceType };
       }
       throw new Error('No datasource found in panel');
     }
@@ -338,7 +352,11 @@ export class StoreDashboardService {
     const variableName = this.parseTemplateVariableRef(ds);
     if (variableName) {
       return {
-        type: this.resolveDatasourceTypeFromTemplating(variableName, templatingList, undefined),
+        type: this.resolveDatasourceTypeFromTemplating(
+          variableName,
+          templatingList,
+          panelDatasourceType,
+        ),
       };
     }
     return this.grafanaApiService.getDatasourceByName(instanceId, ds);
@@ -369,17 +387,19 @@ export class StoreDashboardService {
     templatingList: DashboardTemplatingVariable[] | undefined,
     panelDatasourceType: string | undefined,
   ): string {
+    // The type Grafana embedded on the panel (or its first target) is authoritative and
+    // needs no templating.list entry — checked first so a dashboard whose variable lives
+    // elsewhere (library panel, hand-edited JSON) still imports.
+    if (typeof panelDatasourceType === 'string' && panelDatasourceType.length > 0) {
+      return panelDatasourceType;
+    }
+
     const variable = (templatingList ?? []).find((v) => v.name === variableName);
 
     if (!variable) {
       throw new Error(
         `Panel datasource references template variable "${variableName}" which is not defined in dashboard.templating.list`,
       );
-    }
-
-    // Grafana usually embeds the concrete type beside a variable uid on the panel.
-    if (typeof panelDatasourceType === 'string' && panelDatasourceType.length > 0) {
-      return panelDatasourceType;
     }
 
     // For type=datasource variables, `query` is the type filter (e.g. "prometheus"),
